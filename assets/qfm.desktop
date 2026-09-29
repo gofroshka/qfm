@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=qfm
+GenericName=File Manager
+Comment=Minimalist file manager
+Exec=qfm %U
+Icon=system-file-manager
+Terminal=false
+Categories=System;FileManager;Utility;
+MimeType=inode/directory;
+StartupWMClass=qfm
