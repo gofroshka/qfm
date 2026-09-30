@@ -12,6 +12,7 @@ pkgs.mkShell {
   buildInputs = with pkgs; [
     qt6.qtbase
     qt6.qtdeclarative
+    qt6.qtmultimedia
   ];
 
   # qttypes' build script locates Qt via qmake -query.
@@ -24,8 +25,8 @@ pkgs.mkShell {
 
     # mkShell does not pull in Qt's setup-hook env, wire the import/plugin
     # paths manually so `import QtQuick` resolves at runtime.
-    export QML2_IMPORT_PATH="${pkgs.qt6.qtdeclarative}/lib/qt-6/qml''${QML2_IMPORT_PATH:+:$QML2_IMPORT_PATH}"
-    export QT_PLUGIN_PATH="${pkgs.qt6.qtbase}/lib/qt-6/plugins''${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}"
+    export QML2_IMPORT_PATH="${pkgs.qt6.qtdeclarative}/lib/qt-6/qml:${pkgs.qt6.qtmultimedia}/lib/qt-6/qml''${QML2_IMPORT_PATH:+:$QML2_IMPORT_PATH}"
+    export QT_PLUGIN_PATH="${pkgs.qt6.qtbase}/lib/qt-6/plugins:${pkgs.qt6.qtmultimedia}/lib/qt-6/plugins''${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}"
     export QT_QPA_PLATFORM="''${QT_QPA_PLATFORM:-wayland}"
 
     echo "qfm dev shell — build with: cargo build --release"

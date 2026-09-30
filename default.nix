@@ -17,6 +17,7 @@ pkgs.rustPlatform.buildRustPackage {
   buildInputs = with pkgs; [
     qt6.qtbase
     qt6.qtdeclarative
+    qt6.qtmultimedia
   ];
 
   # qttypes' build script locates Qt through qmake -query.
@@ -25,6 +26,13 @@ pkgs.rustPlatform.buildRustPackage {
   # wrapQtAppsHook wires QT_PLUGIN_PATH / QML2_IMPORT_PATH into the wrapper so
   # `import QtQuick` resolves at runtime without a dev shell.
   dontWrapQtApps = false;
+
+  # QtMultimedia ships its QML module separately from qtdeclarative; make it
+  # importable (and its ffmpeg backend discoverable) in the wrapped binary.
+  preFixup = ''
+    qtWrapperArgs+=(--prefix QML2_IMPORT_PATH : ${pkgs.qt6.qtmultimedia}/lib/qt-6/qml)
+    qtWrapperArgs+=(--prefix QT_PLUGIN_PATH : ${pkgs.qt6.qtmultimedia}/lib/qt-6/plugins)
+  '';
 
   postInstall = ''
     install -Dm644 assets/qfm.desktop $out/share/applications/qfm.desktop
