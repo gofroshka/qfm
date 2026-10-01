@@ -41,6 +41,7 @@ Window {
         readonly property int radiusSmall: 8
         readonly property string font: "Inter"
         readonly property string icon: "JetBrainsMono Nerd Font"
+        readonly property string mono: "JetBrainsMono Nerd Font"
     }
 
     // Rust backend, registered from main.rs as the QML type `Fs` in module `Qfm`.
@@ -59,6 +60,10 @@ Window {
     // Multi-selection: path -> true. `anchor` is the shift-click origin.
     property var selected: ({})
     property int anchor: -1
+    // Browser-style navigation history and type-ahead buffer.
+    property var backStack: []
+    property var forwardStack: []
+    property string typeAhead: ""
     // Raw JSON of the last listing, used to detect external changes.
     property string listingRaw: ""
     // Number of items currently in the trash (for the toolbar badge).
@@ -66,7 +71,7 @@ Window {
     // Pending operation launched from a prompt/confirm dialog.
     property var pendingOp: ({})
 
-    readonly property bool overlayOpen: menu.shown || prompt.shown || confirm.shown || trashPanel.shown
+    readonly property bool overlayOpen: menu.shown || prompt.shown || confirm.shown || trashPanel.shown || quickLook.shown
 
     readonly property var visibleEntries: {
         const q = win.filter.toLowerCase();
@@ -99,9 +104,8 @@ Window {
 
     readonly property string imageSource:
         win.isImage(win.previewEntry) ? fs.file_uri(win.previewEntry.path) : ""
-    readonly property string mediaSource:
-        (win.isAudio(win.previewEntry) || win.isVideo(win.previewEntry))
-            ? fs.file_uri(win.previewEntry.path) : ""
+    readonly property string textSample:
+        win.isText(win.previewEntry) ? fs.read_text(win.previewEntry.path, 8000) : ""
 
     readonly property var crumbs: {
         const p = win.curPath || "";
@@ -122,14 +126,15 @@ Window {
                                  win.index = Math.max(0, win.visibleEntries.length - 1)
 
     // ---- navigation --------------------------------------------------------
-    function navigate(path, keepFilter) {
+    // Load a directory into the view without touching history.
+    function load(path, keepFilter) {
         const raw = fs.list_json(path);
         let data;
         try { data = JSON.parse(raw); } catch (e) { data = { error: "parse error" }; }
         if (data.error !== undefined) {
             win.status = data.error;
             win.toastMsg(data.error);
-            return;
+            return false;
         }
         win.listingRaw = raw;
         win.curPath = data.path;
@@ -140,18 +145,84 @@ Window {
         win.anchor = -1;
         if (!keepFilter) { win.filter = ""; search.text = ""; }
         win.status = (data.entries ? data.entries.length : 0) + " items";
+        return true;
+    }
+
+    // Load a directory and record the move in the back/forward history.
+    function navigate(path, keepFilter) {
+        const from = win.curPath;
+        if (!win.load(path, keepFilter)) return;
+        if (from !== "" && from !== win.curPath) {
+            win.backStack = win.backStack.concat([from]);
+            win.forwardStack = [];
+        }
+    }
+
+    function historyBack() {
+        if (win.backStack.length === 0) return;
+        const target = win.backStack[win.backStack.length - 1];
+        const from = win.curPath;
+        if (!win.load(target, false)) return;
+        win.backStack = win.backStack.slice(0, -1);
+        if (from !== "") win.forwardStack = win.forwardStack.concat([from]);
+    }
+
+    function historyForward() {
+        if (win.forwardStack.length === 0) return;
+        const target = win.forwardStack[win.forwardStack.length - 1];
+        const from = win.curPath;
+        if (!win.load(target, false)) return;
+        win.forwardStack = win.forwardStack.slice(0, -1);
+        if (from !== "") win.backStack = win.backStack.concat([from]);
     }
 
     function refresh(selectPath) {
         const sel = win.visibleEntries[win.index];
         const want = selectPath !== undefined ? selectPath : (sel ? sel.path : null);
-        win.navigate(win.curPath, true);
+        win.load(win.curPath, true);
         if (want) {
             const list = win.visibleEntries;
             for (let i = 0; i < list.length; i++) {
                 if (list[i].path === want) { win.index = i; break; }
             }
         }
+    }
+
+    // Jump to the next entry matching the typed prefix.
+    function typeAheadFind(ch) {
+        win.typeAhead += ch;
+        typeAheadTimer.restart();
+        const q = win.typeAhead.toLowerCase();
+        const list = win.visibleEntries;
+        if (list.length === 0) return;
+        for (let n = 1; n <= list.length; n++) {
+            const i = (win.index + n) % list.length;
+            if (list[i].name.toLowerCase().indexOf(q) === 0) { win.index = i; return; }
+        }
+        for (let i = 0; i < list.length; i++) {
+            if (list[i].name.toLowerCase().indexOf(q) >= 0) { win.index = i; return; }
+        }
+    }
+
+    function pageMove(dir) {
+        const n = win.visibleEntries.length;
+        if (n === 0) return;
+        const rows = Math.max(1, Math.floor(list.height / 38));
+        if (win.selectedCount > 0) win.selected = ({});
+        win.index = Math.max(0, Math.min(n - 1, win.index + dir * rows));
+    }
+
+    // Space: toggle the current row's selection and step down.
+    function toggleCurrent() {
+        if (win.visibleEntries.length === 0) return;
+        win.toggleSelect(win.index);
+        if (win.index < win.visibleEntries.length - 1) win.index += 1;
+    }
+
+    // Space: open the large preview for the current entry.
+    function openQuickLook() {
+        if (!win.activeEntry) return;
+        quickLook.open(win.activeEntry);
     }
 
     // Poll the current directory and apply external changes in place, keeping
@@ -198,9 +269,10 @@ Window {
     function goUp() { if (win.curPath !== win.curParent) win.navigate(win.curParent); }
 
     function move(delta) {
-        if (win.visibleEntries.length === 0) { win.index = 0; return; }
+        const n = win.visibleEntries.length;
+        if (n === 0) { win.index = 0; return; }
         if (win.selectedCount > 0) win.selected = ({});
-        win.index = Math.max(0, Math.min(win.visibleEntries.length - 1, win.index + delta));
+        win.index = ((win.index + delta) % n + n) % n;
     }
 
     // ---- selection ---------------------------------------------------------
@@ -284,6 +356,11 @@ Window {
     }
     function isVideo(e) {
         return !!e && !e.dir && /\.(mp4|mkv|webm|mov|avi|m4v|ogv)$/i.test(e.name);
+    }
+    function isText(e) {
+        if (!e || e.dir) return false;
+        return /\.(txt|md|markdown|rst|log|conf|cfg|ini|toml|yaml|yml|json|xml|csv|tsv|sh|bash|zsh|fish|rs|py|js|mjs|cjs|ts|tsx|jsx|qml|c|h|cc|cpp|hpp|go|java|kt|lua|rb|php|sql|html|htm|css|scss|nix|kdl|desktop|service|diff|patch|env|gitignore|gitattributes|editorconfig)$/i.test(e.name)
+            || /^(README|LICENSE|COPYING|Makefile|Dockerfile|flake\.lock|Cargo\.lock|CMakeLists\.txt|\.gitignore|\.bashrc|\.profile)/i.test(e.name);
     }
 
     function openIndex(i) {
@@ -384,6 +461,12 @@ Window {
         win.startDelete(paths, names, permanent);
     }
 
+    // Delete the current selection (or the entry under the cursor).
+    function deleteCurrent(permanent) {
+        if (win.selectedCount > 0) win.deleteSelection(permanent);
+        else win.deleteIndex(win.index, permanent);
+    }
+
     function startDelete(paths, names, permanent) {
         win.pendingOp = { type: "delete", paths: paths, names: names, permanent: !!permanent };
         confirm.title = permanent ? "Delete permanently?" : "Move to Trash?";
@@ -481,6 +564,7 @@ Window {
                 glyph: "\uf0c5", act: "copy", key: "Ctrl+C"
             });
             items.push({ label: "Copy Path", glyph: "\uf0c1", act: "copypath", key: "Ctrl+\u21e7C" });
+            items.push({ label: "Preview", glyph: "\uf06e", act: "preview", key: "Space" });
             if (n <= 1) items.push({ label: "Rename", glyph: "\uf044", act: "rename", key: "F2" });
             items.push({ sep: true });
             if (n > 1) items.push({
@@ -511,6 +595,7 @@ Window {
         if (act === "open") win.openIndex(i);
         else if (act === "copy") win.copySelection();
         else if (act === "copypath") win.copyPath();
+        else if (act === "preview") win.openQuickLook();
         else if (act === "paste") win.pasteClipboard();
         else if (act === "rename") win.startRename(i);
         else if (act === "trash") {
@@ -651,6 +736,14 @@ Window {
             }
         }
 
+        // Reset the type-ahead prefix after a short pause.
+        Timer {
+            id: typeAheadTimer
+            interval: 800
+            repeat: false
+            onTriggered: win.typeAhead = ""
+        }
+
         // ---- top bar -------------------------------------------------------
         Item {
             id: top
@@ -668,7 +761,9 @@ Window {
                 anchors { left: parent.left; leftMargin: 14; verticalCenter: parent.verticalCenter }
                 spacing: 6
 
-                BarButton { glyph: "\uf060"; onActivated: win.goUp() }
+                BarButton { glyph: "\uf060"; onActivated: win.historyBack() }
+                BarButton { glyph: "\uf061"; onActivated: win.historyForward() }
+                BarButton { glyph: "\uf062"; onActivated: win.goUp() }
                 BarButton { glyph: "\uf015"; onActivated: win.goHome() }
                 BarButton { glyph: "\uf021"; onActivated: win.refresh() }
             }
@@ -1006,7 +1101,7 @@ Window {
             // Declared here so playback state survives selection changes.
             MediaPlayer {
                 id: player
-                source: win.mediaSource
+                source: win.isAudio(win.previewEntry) ? fs.file_uri(win.previewEntry.path) : ""
                 audioOutput: AudioOutput { volume: 1.0 }
                 onSourceChanged: player.stop()
             }
@@ -1148,12 +1243,43 @@ Window {
                         }
                     }
 
+                    // text / code snippet
+                    Rectangle {
+                        width: parent.width
+                        height: 200
+                        visible: win.isText(win.previewEntry) && win.textSample !== ""
+                        radius: theme.radiusSmall
+                        color: theme.bg
+                        clip: true
+                        Flickable {
+                            anchors.fill: parent
+                            anchors.margins: 10
+                            clip: true
+                            contentWidth: panelText.contentWidth
+                            contentHeight: panelText.contentHeight
+                            boundsBehavior: Flickable.StopAtBounds
+                            TextEdit {
+                                id: panelText
+                                width: parent.width
+                                text: win.textSample
+                                readOnly: true
+                                wrapMode: TextEdit.NoWrap
+                                color: theme.textDim
+                                selectionColor: theme.accent
+                                selectedTextColor: theme.bg
+                                font.family: theme.mono
+                                font.pixelSize: 10
+                            }
+                        }
+                    }
+
                     // generic file
                     Column {
                         width: parent.width
                         spacing: 10
                         visible: win.previewEntry !== null
                               && !win.isImage(win.previewEntry) && !win.isAudio(win.previewEntry)
+                              && !(win.isText(win.previewEntry) && win.textSample !== "")
                         Text {
                             anchors.horizontalCenter: parent.horizontalCenter
                             text: win.iconFor(win.previewEntry)
@@ -1290,7 +1416,38 @@ Window {
             if (win.overlayOpen && !menu.shown) { return; }
             const ctrl = e.modifiers & Qt.ControlModifier;
             const shift = e.modifiers & Qt.ShiftModifier;
-            if (ctrl && shift && e.key === Qt.Key_N) {
+            const alt = e.modifiers & Qt.AltModifier;
+            if (alt && e.key === Qt.Key_Left) {
+                win.historyBack();
+                e.accepted = true;
+            } else if (alt && e.key === Qt.Key_Right) {
+                win.historyForward();
+                e.accepted = true;
+            } else if (alt && e.key === Qt.Key_Up) {
+                win.goUp();
+                e.accepted = true;
+            } else if (e.key === Qt.Key_Backspace) {
+                win.deleteCurrent(!!shift);
+                e.accepted = true;
+            } else if (e.key === Qt.Key_Left) {
+                win.goUp();
+                e.accepted = true;
+            } else if (e.key === Qt.Key_Right) {
+                win.openIndex(win.index);
+                e.accepted = true;
+            } else if (e.key === Qt.Key_PageUp) {
+                win.pageMove(-1);
+                e.accepted = true;
+            } else if (e.key === Qt.Key_PageDown) {
+                win.pageMove(1);
+                e.accepted = true;
+            } else if (ctrl && e.key === Qt.Key_Space) {
+                win.toggleCurrent();
+                e.accepted = true;
+            } else if (e.key === Qt.Key_Space) {
+                win.openQuickLook();
+                e.accepted = true;
+            } else if (ctrl && shift && e.key === Qt.Key_N) {
                 win.openNewFolder();
                 e.accepted = true;
             } else if (ctrl && e.key === Qt.Key_N) {
@@ -1300,7 +1457,7 @@ Window {
                 win.startRename(win.index);
                 e.accepted = true;
             } else if (e.key === Qt.Key_Delete) {
-                win.deleteIndex(win.index, !!shift);
+                win.deleteCurrent(!!shift);
                 e.accepted = true;
             } else if (e.key === Qt.Key_Home) {
                 win.index = 0; e.accepted = true;
@@ -1326,6 +1483,9 @@ Window {
                 e.accepted = true;
             } else if (ctrl && e.key === Qt.Key_F) {
                 search.focusInput();
+                e.accepted = true;
+            } else if (!ctrl && !alt && e.text.length === 1 && e.text >= " ") {
+                win.typeAheadFind(e.text);
                 e.accepted = true;
             }
         }
@@ -1357,6 +1517,11 @@ Window {
         }
 
         TrashPanel { id: trashPanel }
+
+        QuickLook {
+            id: quickLook
+            onShownChanged: if (!quickLook.shown) root.forceActiveFocus()
+        }
 
         Toast { id: toast }
     }
@@ -1763,6 +1928,416 @@ Window {
                     danger: cd.danger
                     onActivated: cd.confirmed()
                 }
+            }
+        }
+    }
+
+    component QuickLook: Item {
+        id: ql
+        property bool shown: false
+        property var entry: null
+        property string source: ""
+        property string text: ""
+        property real zoom: 1
+        property real panX: 0
+        property real panY: 0
+
+        function open(e) {
+            qlVideo.stop();
+            qlAudio.stop();
+            ql.entry = e;
+            ql.source = "";
+            ql.text = "";
+            ql.zoom = 1;
+            ql.panX = 0;
+            ql.panY = 0;
+            if (e && !e.dir) {
+                if (win.isImage(e) || win.isVideo(e) || win.isAudio(e)) {
+                    ql.source = fs.file_uri(e.path);
+                    if (win.isVideo(e)) qlVideo.play();
+                } else if (win.isText(e)) {
+                    ql.text = fs.read_text(e.path, 300000);
+                }
+            }
+            ql.shown = true;
+            ql.forceActiveFocus();
+        }
+        function close() {
+            qlVideo.stop();
+            qlAudio.stop();
+            ql.shown = false;
+        }
+        function step(d) {
+            const list = win.visibleEntries;
+            if (list.length === 0) return;
+            let i = win.index + d;
+            if (i < 0) i = 0;
+            if (i >= list.length) i = list.length - 1;
+            win.index = i;
+            ql.open(list[i]);
+        }
+
+        anchors.fill: parent
+        z: 108
+        focus: shown
+        opacity: shown ? 1 : 0
+        visible: opacity > 0.01
+        Behavior on opacity { NumberAnimation { duration: 140 } }
+
+        Keys.onEscapePressed: (e) => { ql.close(); e.accepted = true; }
+        Keys.onReturnPressed: (e) => { ql.close(); e.accepted = true; }
+        Keys.onEnterPressed: (e) => { ql.close(); e.accepted = true; }
+        Keys.onLeftPressed: (e) => { ql.step(-1); e.accepted = true; }
+        Keys.onRightPressed: (e) => { ql.step(1); e.accepted = true; }
+        Keys.onUpPressed: (e) => { ql.step(-1); e.accepted = true; }
+        Keys.onDownPressed: (e) => { ql.step(1); e.accepted = true; }
+        Keys.onSpacePressed: (e) => { ql.close(); e.accepted = true; }
+        Keys.onPressed: (e) => {
+            if (e.key === Qt.Key_Plus || e.key === Qt.Key_Equal) {
+                ql.zoom = Math.min(8, ql.zoom * 1.25); e.accepted = true;
+            } else if (e.key === Qt.Key_Minus) {
+                ql.zoom = Math.max(0.2, ql.zoom / 1.25); e.accepted = true;
+            } else if (e.key === Qt.Key_0) {
+                ql.zoom = 1; ql.panX = 0; ql.panY = 0; e.accepted = true;
+            }
+        }
+
+        Rectangle {
+            anchors.fill: parent
+            color: Qt.rgba(0, 0, 0, 0.9)
+            MouseArea { anchors.fill: parent; onClicked: ql.close() }
+        }
+
+        // image: zoom + pan
+        Item {
+            id: imageStage
+            anchors.fill: parent
+            anchors.margins: 48
+            anchors.bottomMargin: 44
+            visible: ql.entry !== null && win.isImage(ql.entry)
+            clip: true
+
+            Image {
+                id: qlImage
+                source: (ql.entry && win.isImage(ql.entry)) ? ql.source : ""
+                asynchronous: true
+                cache: false
+                sourceSize.width: 4096
+                sourceSize.height: 4096
+                fillMode: Image.PreserveAspectFit
+                width: parent.width
+                height: parent.height
+                scale: ql.zoom
+                transformOrigin: Item.Center
+                x: (parent.width - width) / 2 + ql.panX
+                y: (parent.height - height) / 2 + ql.panY
+                Behavior on scale { NumberAnimation { duration: 120 } }
+            }
+            MouseArea {
+                anchors.fill: parent
+                hoverEnabled: true
+                property real lastX
+                property real lastY
+                cursorShape: (pressed && ql.zoom > 1) ? Qt.ClosedHandCursor : Qt.OpenHandCursor
+                onPressed: (m) => { lastX = m.x; lastY = m.y; }
+                onPositionChanged: (m) => {
+                    if (pressed && ql.zoom > 1) {
+                        ql.panX += m.x - lastX;
+                        ql.panY += m.y - lastY;
+                        lastX = m.x;
+                        lastY = m.y;
+                    }
+                }
+                onDoubleClicked: { ql.zoom = ql.zoom > 1 ? 1 : 2; ql.panX = 0; ql.panY = 0; }
+                onWheel: (w) => {
+                    ql.zoom = Math.max(0.2, Math.min(8, ql.zoom * (w.angleDelta.y > 0 ? 1.15 : 0.87)));
+                }
+            }
+        }
+
+        // video
+        Video {
+            id: qlVideo
+            anchors.centerIn: parent
+            anchors.verticalCenterOffset: -26
+            width: Math.min(parent.width - 96, 1280)
+            height: Math.min(parent.height - 168, width * 9 / 16)
+            visible: ql.entry !== null && win.isVideo(ql.entry)
+            source: (ql.entry && win.isVideo(ql.entry)) ? ql.source : ""
+            fillMode: VideoOutput.PreserveAspectFit
+            autoPlay: true
+            onSourceChanged: if (source !== "") play()
+
+            MouseArea {
+                anchors.fill: parent
+                onClicked: qlVideo.playbackState === MediaPlayer.PlayingState ? qlVideo.pause() : qlVideo.play()
+            }
+        }
+
+        // video controls
+        Column {
+            id: videoControls
+            visible: ql.entry !== null && win.isVideo(ql.entry)
+            anchors.bottom: parent.bottom
+            anchors.bottomMargin: 18
+            anchors.horizontalCenter: parent.horizontalCenter
+            width: Math.min(parent.width - 96, 900)
+            spacing: 10
+
+            Row {
+                width: parent.width
+                spacing: 10
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: 52
+                    text: win.fmtClock(qlVideo.position)
+                    color: theme.textDim
+                    font.family: theme.font
+                    font.pixelSize: 10
+                }
+                Item {
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: parent.width - 52 - 52 - 20
+                    height: 16
+                    Rectangle {
+                        id: vidSeek
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: parent.width
+                        height: 5
+                        radius: 2.5
+                        color: theme.track
+                        Rectangle {
+                            height: parent.height
+                            radius: 2.5
+                            color: theme.accent
+                            width: {
+                                const d = qlVideo.duration;
+                                return d > 0 ? vidSeek.width * Math.max(0, Math.min(1, qlVideo.position / d)) : 0;
+                            }
+                        }
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        function seekTo(mx) {
+                            if (qlVideo.duration > 0)
+                                qlVideo.position = Math.max(0, Math.min(1, mx / width)) * qlVideo.duration;
+                        }
+                        onClicked: (m) => seekTo(m.x)
+                        onPositionChanged: (m) => { if (pressed) seekTo(m.x); }
+                    }
+                }
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: 52
+                    horizontalAlignment: Text.AlignRight
+                    text: win.fmtClock(qlVideo.duration)
+                    color: theme.textDim
+                    font.family: theme.font
+                    font.pixelSize: 10
+                }
+            }
+
+            Row {
+                anchors.horizontalCenter: parent.horizontalCenter
+                spacing: 12
+                BarButton {
+                    glyph: "\uf051"
+                    onActivated: qlVideo.position = Math.max(0, qlVideo.position - 10000)
+                }
+                BarButton {
+                    glyph: qlVideo.playbackState === MediaPlayer.PlayingState ? "\uf04c" : "\uf04b"
+                    onActivated: qlVideo.playbackState === MediaPlayer.PlayingState ? qlVideo.pause() : qlVideo.play()
+                }
+                BarButton {
+                    glyph: "\uf050"
+                    onActivated: qlVideo.position = Math.min(qlVideo.duration, qlVideo.position + 10000)
+                }
+            }
+        }
+
+        // audio
+        MediaPlayer {
+            id: qlAudio
+            audioOutput: AudioOutput {}
+            source: (ql.entry && win.isAudio(ql.entry)) ? ql.source : ""
+            onSourceChanged: stop()
+        }
+        Rectangle {
+            visible: ql.entry !== null && win.isAudio(ql.entry)
+            anchors.centerIn: parent
+            width: Math.min(parent.width - 96, 460)
+            height: 220
+            radius: 16
+            color: theme.surface2
+            border.width: 1
+            border.color: theme.border
+
+            Column {
+                anchors.fill: parent
+                anchors.margins: 22
+                spacing: 14
+
+                Text {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    text: "\uf1c7"
+                    color: theme.accent
+                    font.family: theme.icon
+                    font.pixelSize: 44
+                }
+                Text {
+                    width: parent.width
+                    text: ql.entry ? ql.entry.name : ""
+                    color: theme.text
+                    font.family: theme.font
+                    font.pixelSize: 13
+                    horizontalAlignment: Text.AlignHCenter
+                    elide: Text.ElideMiddle
+                }
+                Item {
+                    width: parent.width
+                    height: 16
+                    Rectangle {
+                        id: qlSeek
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: parent.width
+                        height: 5
+                        radius: 2.5
+                        color: theme.track
+                        Rectangle {
+                            height: parent.height
+                            radius: 2.5
+                            color: theme.accent
+                            width: {
+                                const d = qlAudio.duration;
+                                return d > 0 ? qlSeek.width * Math.max(0, Math.min(1, qlAudio.position / d)) : 0;
+                            }
+                        }
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: (m) => {
+                            if (qlAudio.duration > 0)
+                                qlAudio.position = Math.max(0, Math.min(1, m.x / width)) * qlAudio.duration;
+                        }
+                    }
+                }
+                Row {
+                    width: parent.width
+                    Text {
+                        width: parent.width / 2
+                        text: win.fmtClock(qlAudio.position)
+                        color: theme.textDim
+                        font.family: theme.font
+                        font.pixelSize: 10
+                    }
+                    Text {
+                        width: parent.width / 2
+                        horizontalAlignment: Text.AlignRight
+                        text: win.fmtClock(qlAudio.duration)
+                        color: theme.textDim
+                        font.family: theme.font
+                        font.pixelSize: 10
+                    }
+                }
+                Row {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    spacing: 10
+                    BarButton {
+                        glyph: "\uf048"
+                        onActivated: qlAudio.position = Math.max(0, qlAudio.position - 10000)
+                    }
+                    BarButton {
+                        glyph: qlAudio.playbackState === MediaPlayer.PlayingState ? "\uf04c" : "\uf04b"
+                        onActivated: qlAudio.playbackState === MediaPlayer.PlayingState ? qlAudio.pause() : qlAudio.play()
+                    }
+                    BarButton {
+                        glyph: "\uf051"
+                        onActivated: qlAudio.position = Math.min(qlAudio.duration, qlAudio.position + 10000)
+                    }
+                }
+            }
+        }
+
+        // text / code
+        Flickable {
+            id: textStage
+            visible: ql.entry !== null && win.isText(ql.entry) && ql.text !== ""
+            anchors.fill: parent
+            anchors.margins: 40
+            anchors.topMargin: 64
+            anchors.bottomMargin: 44
+            clip: true
+            contentWidth: qlTextEdit.contentWidth + 8
+            contentHeight: qlTextEdit.contentHeight + 8
+            boundsBehavior: Flickable.StopAtBounds
+
+            TextEdit {
+                id: qlTextEdit
+                x: 4; y: 4
+                width: textStage.width
+                text: ql.text
+                readOnly: true
+                wrapMode: TextEdit.NoWrap
+                color: theme.text
+                selectionColor: theme.accent
+                selectedTextColor: theme.bg
+                font.family: theme.mono
+                font.pixelSize: 12
+            }
+        }
+
+        // fallback: dirs, binaries, empty text
+        Column {
+            anchors.centerIn: parent
+            spacing: 12
+            visible: ql.entry !== null && !win.isImage(ql.entry) && !win.isVideo(ql.entry)
+                     && !win.isAudio(ql.entry) && !(win.isText(ql.entry) && ql.text !== "")
+            Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: ql.entry ? win.iconFor(ql.entry) : "\uf15b"
+                color: theme.track
+                font.family: theme.icon
+                font.pixelSize: 72
+            }
+            Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: ql.entry ? ql.entry.name : ""
+                color: theme.text
+                font.family: theme.font
+                font.pixelSize: 15
+            }
+            Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: win.describe(ql.entry)
+                color: theme.textDim
+                font.family: theme.font
+                font.pixelSize: 11
+            }
+        }
+
+        // header + hint
+        Rectangle {
+            anchors { left: parent.left; right: parent.right; top: parent.top }
+            height: 48
+            color: Qt.rgba(0, 0, 0, 0.35)
+            Text {
+                anchors { left: parent.left; leftMargin: 18; verticalCenter: parent.verticalCenter }
+                width: parent.width - 260
+                text: ql.entry ? ql.entry.name : ""
+                color: theme.text
+                font.family: theme.font
+                font.pixelSize: 13
+                elide: Text.ElideMiddle
+            }
+            Text {
+                anchors { right: parent.right; rightMargin: 18; verticalCenter: parent.verticalCenter }
+                text: (win.index + 1) + " / " + win.visibleEntries.length
+                      + "   \u2190\u2192 next \u00b7 +/\u2212 zoom \u00b7 Esc close"
+                color: theme.textDim
+                font.family: theme.font
+                font.pixelSize: 10
             }
         }
     }
