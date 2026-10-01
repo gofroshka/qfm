@@ -1,5 +1,5 @@
 {
-  pkgs ? import <nixpkgs> { },
+  pkgs,
 }:
 
 pkgs.rustPlatform.buildRustPackage {
@@ -22,6 +22,15 @@ pkgs.rustPlatform.buildRustPackage {
 
   # qttypes' build script locates Qt through qmake -query.
   QMAKE = "${pkgs.qt6.qtbase}/bin/qmake6";
+
+  # The QML smoke test compiles the embedded frontend, so `cargo test` needs
+  # Qt's QML import paths (the wrapper only sets these for the installed bin).
+  preCheck = ''
+    export QML2_IMPORT_PATH="${pkgs.qt6.qtdeclarative}/lib/qt-6/qml:${pkgs.qt6.qtmultimedia}/lib/qt-6/qml"
+    export QT_PLUGIN_PATH="${pkgs.qt6.qtbase}/lib/qt-6/plugins:${pkgs.qt6.qtmultimedia}/lib/qt-6/plugins"
+    export QT_QPA_PLATFORM=offscreen
+    export XDG_CACHE_HOME="$(mktemp -d)"
+  '';
 
   # wrapQtAppsHook wires QT_PLUGIN_PATH / QML2_IMPORT_PATH into the wrapper so
   # `import QtQuick` resolves at runtime without a dev shell.
