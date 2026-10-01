@@ -4,7 +4,7 @@ use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use crate::util::path::unique_name;
+use crate::util::path::{split_name, unique_name};
 use crate::util::text::esc;
 
 /// A single directory entry, ready to be serialised to the UI.
@@ -123,10 +123,64 @@ pub fn copy_into(dest_dir: &Path, src: &Path) -> Result<PathBuf, String> {
         .ok_or_else(|| "Invalid source".to_owned())?
         .to_string_lossy()
         .into_owned();
-    let (base, ext) = crate::util::path::split_name(&name);
+    let (base, ext) = split_name(&name);
     let dst = dest_dir.join(unique_name(dest_dir, &base, &ext));
     copy_recursive(src, &dst)?;
     Ok(dst)
+}
+
+/// Copy several paths into `dest_dir`, avoiding name collisions.
+pub fn copy_many(dest_dir: &Path, paths: &[PathBuf]) -> Result<(), String> {
+    if !dest_dir.is_dir() {
+        return Err("Not a directory".to_owned());
+    }
+    for src in paths {
+        copy_into(dest_dir, src)?;
+    }
+    Ok(())
+}
+
+/// Move `paths` into `dest_dir`. Entries already in `dest_dir` are skipped and
+/// a directory cannot be moved inside itself; cross-device moves fall back to
+/// copy + delete.
+pub fn move_into(dest_dir: &Path, paths: &[PathBuf]) -> Result<(), String> {
+    if !dest_dir.is_dir() {
+        return Err("Not a directory".to_owned());
+    }
+    for src in paths {
+        move_entry(dest_dir, src)?;
+    }
+    Ok(())
+}
+
+fn move_entry(dest_dir: &Path, src: &Path) -> Result<(), String> {
+    if src.parent() == Some(dest_dir) {
+        return Ok(());
+    }
+    let canonical_src = fs::canonicalize(src).unwrap_or_else(|_| src.to_path_buf());
+    let canonical_dest = fs::canonicalize(dest_dir).unwrap_or_else(|_| dest_dir.to_path_buf());
+    if canonical_dest == canonical_src {
+        return Ok(());
+    }
+    if canonical_dest.starts_with(&canonical_src) {
+        return Err(format!(
+            "Cannot move \u{201c}{}\u{201d} into itself",
+            src.display()
+        ));
+    }
+    let name = src
+        .file_name()
+        .ok_or_else(|| "Invalid source".to_owned())?
+        .to_string_lossy()
+        .into_owned();
+    let (base, ext) = split_name(&name);
+    let dst = dest_dir.join(unique_name(dest_dir, &base, &ext));
+    if fs::rename(src, &dst).is_ok() {
+        return Ok(());
+    }
+    copy_recursive(src, &dst)?;
+    remove_path(src);
+    Ok(())
 }
 
 /// Remove a file, symlink or directory tree, ignoring errors.
@@ -172,3 +226,63 @@ pub fn dir_size(path: &Path) -> u64 {
         meta.len()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("qfm-fsops-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn moves_files_into_directory() {
+        let base = tmp("move");
+        let src = base.join("src");
+        let dst = base.join("dst");
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dst).unwrap();
+        let file = src.join("a.txt");
+        fs::write(&file, b"a").unwrap();
+        let dir = src.join("sub");
+        fs::create_dir_all(&dir).unwrap();
+
+        move_into(&dst, &[file.clone(), dir.clone()]).unwrap();
+        assert!(!file.exists() && !dir.exists());
+        assert!(dst.join("a.txt").is_file());
+        assert!(dst.join("sub").is_dir());
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn move_avoids_collisions() {
+        let base = tmp("collide");
+        let src = base.join("src");
+        let dst = base.join("dst");
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dst).unwrap();
+        fs::write(dst.join("a.txt"), b"old").unwrap();
+        let file = src.join("a.txt");
+        fs::write(&file, b"new").unwrap();
+
+        move_into(&dst, &[file]).unwrap();
+        assert!(dst.join("a.txt").is_file());
+        assert!(dst.join("a 2.txt").is_file());
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn rejects_moving_directory_into_itself() {
+        let base = tmp("self");
+        let dir = base.join("dir");
+        let sub = dir.join("sub");
+        fs::create_dir_all(&sub).unwrap();
+        assert!(move_into(&sub, &[dir.clone()]).is_err());
+        assert!(move_into(&dir, &[dir.clone()]).unwrap() == ());
+        let _ = fs::remove_dir_all(&base);
+    }
+}
+

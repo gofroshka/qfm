@@ -8,15 +8,22 @@ Rectangle {
     required property var modelData
     required property int index
     property bool selected: false
+    // Hover is tracked by the list overlay, not by a MouseArea here.
+    property bool hovered: false
 
-    signal rowActivated(int index)
-    signal rowClicked(int index, int modifiers)
     signal rowContext(int index, real x, real y)
+    // A drop landed on this (folder) row: move/copy `uris` into `target`.
+    signal dropRequested(string target, var uris, bool internal)
 
     width: ListView.view.width
     height: Theme.rowHeight
     radius: Theme.radiusSmall
-    color: row.selected ? Qt.rgba(1, 1, 1, 0.11) : rowMa.containsMouse ? Theme.hover : "transparent"
+    color: row.dropActive ? Qt.rgba(0.84, 0.84, 0.86, 0.18)
+         : row.selected ? Qt.rgba(1, 1, 1, 0.11)
+         : row.hovered ? Theme.hover
+         : "transparent"
+    border.width: row.dropActive ? 1 : 0
+    border.color: Theme.accent
     Behavior on color {
         ColorAnimation {
             duration: 100
@@ -38,6 +45,24 @@ Rectangle {
         }
     }
     Component.onCompleted: entrance.start()
+
+    // Drop target for folder rows: move the dragged selection inside.
+    DropArea {
+        id: dropTarget
+        anchors.fill: parent
+        enabled: row.modelData.dir
+        onDropped: drop => {
+            if (!drop.hasUrls)
+                return;
+            const uris = [];
+            for (let i = 0; i < drop.urls.length; i++) uris.push(String(drop.urls[i]));
+            drop.accept(Qt.MoveAction);
+            row.dropRequested(row.modelData.path, uris,
+                              drop.formats.indexOf("application/x-qfm-internal") >= 0);
+        }
+    }
+
+    readonly property bool dropActive: dropTarget.containsDrag
 
     Row {
         anchors {
@@ -85,22 +110,14 @@ Rectangle {
         }
     }
 
+    // Right-click only; left-button interaction lives in the list overlay.
     MouseArea {
         id: rowMa
         anchors.fill: parent
-        hoverEnabled: true
-        acceptedButtons: Qt.LeftButton | Qt.RightButton
+        acceptedButtons: Qt.RightButton
         onClicked: mouse => {
-            if (mouse.button === Qt.RightButton) {
-                const p = rowMa.mapToItem(null, mouse.x, mouse.y);
-                row.rowContext(row.index, p.x, p.y);
-            } else {
-                row.rowClicked(row.index, mouse.modifiers);
-            }
-        }
-        onDoubleClicked: mouse => {
-            if (mouse.button === Qt.LeftButton)
-                row.rowActivated(row.index);
+            const p = rowMa.mapToItem(null, mouse.x, mouse.y);
+            row.rowContext(row.index, p.x, p.y);
         }
     }
 }

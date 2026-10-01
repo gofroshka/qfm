@@ -9,6 +9,7 @@ Flickable {
     property var model: []
     property string currentPath: ""
     signal navigate(string path)
+    signal dropRequested(string path, var uris, bool internal)
 
     height: 28
     contentWidth: crumbRow.width
@@ -43,7 +44,7 @@ Flickable {
                     width: crumbText.implicitWidth + 16
                     height: 24
                     radius: 12
-                    color: crumbMa.containsMouse ? Theme.hover : "transparent"
+                    color: (crumbMa.containsMouse || crumbDrop.containsDrag) ? Theme.hover : "transparent"
                     Behavior on color { ColorAnimation { duration: 90 } }
 
                     Text {
@@ -60,6 +61,19 @@ Flickable {
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
                         onClicked: crumbs.navigate(crumb.modelData.path)
+                    }
+                    DropArea {
+                        id: crumbDrop
+                        anchors.fill: parent
+                        onDropped: drop => {
+                            if (!drop.hasUrls)
+                                return;
+                            const uris = [];
+                            for (let i = 0; i < drop.urls.length; i++) uris.push(String(drop.urls[i]));
+                            drop.accept(Qt.MoveAction);
+                            crumbs.dropRequested(crumb.modelData.path, uris,
+                                                 drop.formats.indexOf("application/x-qfm-internal") >= 0);
+                        }
                     }
                 }
 

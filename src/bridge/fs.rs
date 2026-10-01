@@ -81,6 +81,24 @@ pub struct Fs {
         .into()
     }),
 
+    // Move `file://` URIs (newline separated) into `dest`. Returns "" or error.
+    move_uris: qt_method!(fn move_uris(&self, dest: QString, uris: QString) -> QString {
+        let dest = PathBuf::from(dest.to_string());
+        match crate::fs_ops::move_into(&dest, &uris_to_paths(&uris.to_string())) {
+            Ok(_) => QString::from(""),
+            Err(e) => e.into(),
+        }
+    }),
+
+    // Copy `file://` URIs (newline separated) into `dest`. Returns "" or error.
+    copy_uris: qt_method!(fn copy_uris(&self, dest: QString, uris: QString) -> QString {
+        let dest = PathBuf::from(dest.to_string());
+        match crate::fs_ops::copy_many(&dest, &uris_to_paths(&uris.to_string())) {
+            Ok(_) => QString::from(""),
+            Err(e) => e.into(),
+        }
+    }),
+
     // Remove entries permanently. Returns "" on success or an error message.
     delete_permanent: qt_method!(fn delete_permanent(&self, paths: QString) -> QString {
         for p in crate::util::path::parse_paths(&paths.to_string()) {
@@ -98,4 +116,13 @@ pub struct Fs {
             Err(e) => e.to_string().into(),
         }
     }),
+}
+
+/// Parse a newline-separated list of `file://` URIs into local paths.
+fn uris_to_paths(list: &str) -> Vec<PathBuf> {
+    list.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(|l| PathBuf::from(crate::util::text::from_uri(l)))
+        .collect()
 }

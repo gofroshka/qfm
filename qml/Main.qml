@@ -56,6 +56,15 @@ Window {
     // Pending operation launched from a prompt/confirm dialog.
     property var pendingOp: ({})
 
+    // Rubber-band selection rectangle, in scene coordinates.
+    property bool marqueeActive: false
+    property real marqueeX0: 0
+    property real marqueeY0: 0
+    property real marqueeX1: 0
+    property real marqueeY1: 0
+    // Row index under the cursor (drives the hover highlight).
+    property int hoverIndex: -1
+
     readonly property bool overlayOpen:
         menu.shown || prompt.shown || confirm.shown || trashPanel.shown || quickLook.shown
 
@@ -322,6 +331,72 @@ Window {
         for (let i = 0; i < list.length; i++) if (sel[list[i].path]) out.push(list[i].path);
         if (out.length === 0 && win.activeEntry) out.push(win.activeEntry.path);
         return out;
+    }
+
+    // `file://` URIs to drag from a row: the whole selection when the row is
+    // selected, otherwise just that entry.
+    function dragUriList(index) {
+        const list = win.visibleEntries;
+        const e = list[index];
+        if (!e) return [];
+        if (win.isSelected(e.path) && win.selectedCount > 1)
+            return win.selectedPaths().map(p => preview.file_uri(p));
+        return [preview.file_uri(e.path)];
+    }
+
+    // Handle a drop onto a folder row / breadcrumb. Internal drags move the
+    // entries, drags from other applications copy them.
+    function handleDrop(target, uris, internal) {
+        if (!target || !uris || uris.length === 0) return;
+        const joined = uris.join("\n");
+        const err = internal ? fs.move_uris(target, joined) : fs.copy_uris(target, joined);
+        if (err) { win.toastMsg(err); return; }
+        win.toastMsg(internal
+                     ? (uris.length > 1 ? "Moved " + uris.length + " items" : "Moved")
+                     : (uris.length > 1 ? "Copied " + uris.length + " items" : "Copied"));
+        win.refresh();
+    }
+
+    // ---- rubber-band selection --------------------------------------------
+    function marqueeBegin(x, y) {
+        win.marqueeActive = true;
+        win.marqueeX0 = x;
+        win.marqueeY0 = y;
+        win.marqueeX1 = x;
+        win.marqueeY1 = y;
+    }
+
+    function marqueeUpdate(x, y) {
+        win.marqueeX1 = x;
+        win.marqueeY1 = y;
+        win.applyMarquee();
+    }
+
+    function marqueeEnd() { win.marqueeActive = false; }
+
+    // Select every visible entry intersecting the marquee rectangle.
+    function applyMarquee() {
+        const rx = Math.min(win.marqueeX0, win.marqueeX1);
+        const ry = Math.min(win.marqueeY0, win.marqueeY1);
+        const rw = Math.abs(win.marqueeX1 - win.marqueeX0);
+        const rh = Math.abs(win.marqueeY1 - win.marqueeY0);
+        const tl = list.mapFromItem(null, rx, ry);
+        const br = list.mapFromItem(null, rx + rw, ry + rh);
+        const cx1 = tl.x + list.contentX;
+        const cy1 = tl.y + list.contentY;
+        const cx2 = br.x + list.contentX;
+        const cy2 = br.y + list.contentY;
+        const next = {};
+        const entries = win.visibleEntries;
+        for (let i = 0; i < entries.length; i++) {
+            const item = list.itemAtIndex(i);
+            if (!item) continue;
+            if (item.x < cx2 && item.x + item.width > cx1
+                    && item.y < cy2 && item.y + item.height > cy1)
+                next[entries[i].path] = true;
+        }
+        win.selected = next;
+        win.anchor = -1;
     }
 
     // Mouse click on a row: plain replaces, Ctrl toggles, Shift extends.
@@ -720,6 +795,7 @@ Window {
                 model: win.crumbs
                 currentPath: win.curPath
                 onNavigate: (path) => win.navigate(path)
+                onDropRequested: (path, uris, internal) => win.handleDrop(path, uris, internal)
             }
 
             Row {
@@ -837,9 +913,145 @@ Window {
 
             delegate: FileRow {
                 selected: win.isSelected(modelData.path)
-                onRowClicked: (index, modifiers) => win.handleRowClick(index, modifiers)
-                onRowActivated: (index) => win.openIndex(index)
+                hovered: index === win.hoverIndex
                 onRowContext: (index, x, y) => win.openMenu(index, x, y)
+                onDropRequested: (target, uris, internal) => win.handleDrop(target, uris, internal)
+            }
+        }
+
+        // ---- list mouse overlay --------------------------------------------
+        // A single transparent surface above the list that decides, on press,
+        // whether the gesture is a file drag (selected row), a rubber-band
+        // selection (empty area or unselected row) or a plain click.
+        Item {
+            id: listDragProxy
+            width: 1
+            height: 1
+            x: -1000
+            y: -1000
+        }
+
+        MouseArea {
+            id: listMouse
+            anchors.fill: list
+            z: 55
+            acceptedButtons: Qt.LeftButton
+            hoverEnabled: true
+            preventStealing: true
+
+            property int pressIndex: -1
+            property real pressX: 0
+            property real pressY: 0
+            property bool banding: false
+            property bool moved: false
+            // Pressed on a selected row -> file drag is allowed.
+            property bool armed: false
+            property var grab: null
+            property url pixmap: ""
+
+            drag.target: listMouse.armed ? listDragProxy : null
+            drag.threshold: 8
+
+            Drag.active: listMouse.drag.active
+            Drag.dragType: Drag.Automatic
+            Drag.supportedActions: Qt.CopyAction | Qt.MoveAction
+            Drag.proposedAction: Qt.CopyAction
+            Drag.hotSpot.x: 12
+            Drag.hotSpot.y: Theme.rowHeight / 2
+            Drag.imageSource: listMouse.pixmap
+            Drag.imageSourceSize: Qt.size(list.width, Theme.rowHeight)
+            Drag.mimeData: ({
+                "text/uri-list": listMouse.pressIndex >= 0
+                                 ? win.dragUriList(listMouse.pressIndex).join("\r\n") : "",
+                "application/x-qfm-internal": "1"
+            })
+
+            function indexAt(mx, my) {
+                return list.indexAt(mx + list.contentX, my + list.contentY);
+            }
+
+            function selectedAt(i) {
+                const e = win.visibleEntries[i];
+                return !!e && win.isSelected(e.path);
+            }
+
+            onEntered: win.hoverIndex = indexAt(mouseX, mouseY)
+            onExited: win.hoverIndex = -1
+
+            onPressed: mouse => {
+                pressX = mouse.x;
+                pressY = mouse.y;
+                banding = false;
+                moved = false;
+                pressIndex = indexAt(mouse.x, mouse.y);
+                win.hoverIndex = pressIndex;
+                armed = pressIndex >= 0 && selectedAt(pressIndex);
+                if (armed) {
+                    const item = list.itemAtIndex(pressIndex);
+                    if (item)
+                        item.grabToImage(function(result) {
+                            listMouse.grab = result;
+                            listMouse.pixmap = result.url;
+                        });
+                }
+            }
+
+            onPositionChanged: mouse => {
+                win.hoverIndex = indexAt(mouse.x, mouse.y);
+                if (!pressed)
+                    return;
+                if (!moved && (Math.abs(mouse.x - pressX) > 6 || Math.abs(mouse.y - pressY) > 6))
+                    moved = true;
+                if (listMouse.armed || !moved)
+                    return;
+                if (!banding) {
+                    banding = true;
+                    const p0 = listMouse.mapToItem(null, pressX, pressY);
+                    win.marqueeBegin(p0.x, p0.y);
+                }
+                const p = listMouse.mapToItem(null, mouse.x, mouse.y);
+                win.marqueeUpdate(p.x, p.y);
+            }
+
+            onReleased: mouse => {
+                if (banding) {
+                    win.marqueeEnd();
+                } else if (!moved) {
+                    if (pressIndex >= 0)
+                        win.handleRowClick(pressIndex, mouse.modifiers);
+                    else if (win.selectedCount > 0)
+                        win.selected = ({});
+                }
+                banding = false;
+                moved = false;
+                armed = false;
+                pressIndex = -1;
+            }
+
+            onCanceled: {
+                if (banding)
+                    win.marqueeEnd();
+                banding = false;
+                moved = false;
+                armed = false;
+                pressIndex = -1;
+            }
+
+            onDoubleClicked: mouse => {
+                const i = indexAt(mouse.x, mouse.y);
+                if (i >= 0)
+                    win.openIndex(i);
+            }
+
+            // The overlay sits above the ListView, so wheel scrolling must be
+            // forwarded to it manually.
+            WheelHandler {
+                onWheel: event => {
+                    const delta = event.pixelDelta.y !== 0 ? event.pixelDelta.y : event.angleDelta.y;
+                    const max = Math.max(0, list.contentHeight - list.height);
+                    list.contentY = Math.max(0, Math.min(max, list.contentY - delta));
+                    event.accepted = true;
+                }
             }
         }
 
@@ -849,6 +1061,21 @@ Window {
             visible: win.visibleEntries.length === 0
             opacity: visible ? 1 : 0
             Behavior on opacity { NumberAnimation { duration: 200 } }
+        }
+
+        // ---- rubber-band rectangle -----------------------------------------
+        Rectangle {
+            id: marqueeRect
+            visible: win.marqueeActive
+            z: 60
+            x: Math.min(win.marqueeX0, win.marqueeX1)
+            y: Math.min(win.marqueeY0, win.marqueeY1)
+            width: Math.abs(win.marqueeX1 - win.marqueeX0)
+            height: Math.abs(win.marqueeY1 - win.marqueeY0)
+            color: Qt.rgba(1, 1, 1, 0.08)
+            border.width: 1
+            border.color: Theme.accent
+            radius: 2
         }
 
         // ---- preview panel -------------------------------------------------
