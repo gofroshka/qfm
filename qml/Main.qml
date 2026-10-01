@@ -1524,9 +1524,63 @@ Window {
         }
 
         Toast { id: toast }
+
+        // ---- resize handles -------------------------------------------------
+        ResizeHandle {
+            edges: Qt.TopEdge; height: 6; z: 80
+            anchors { left: parent.left; right: parent.right; top: parent.top; leftMargin: 12; rightMargin: 12 }
+        }
+        ResizeHandle {
+            edges: Qt.BottomEdge; height: 6; z: 80
+            anchors { left: parent.left; right: parent.right; bottom: parent.bottom; leftMargin: 12; rightMargin: 12 }
+        }
+        ResizeHandle {
+            edges: Qt.LeftEdge; width: 6; z: 80
+            anchors { top: parent.top; bottom: parent.bottom; left: parent.left; topMargin: 12; bottomMargin: 12 }
+        }
+        ResizeHandle {
+            edges: Qt.RightEdge; width: 6; z: 80
+            anchors { top: parent.top; bottom: parent.bottom; right: parent.right; topMargin: 12; bottomMargin: 12 }
+        }
+        ResizeHandle {
+            edges: Qt.TopEdge | Qt.LeftEdge; width: 12; height: 12; z: 81
+            anchors { top: parent.top; left: parent.left }
+        }
+        ResizeHandle {
+            edges: Qt.TopEdge | Qt.RightEdge; width: 12; height: 12; z: 81
+            anchors { top: parent.top; right: parent.right }
+        }
+        ResizeHandle {
+            edges: Qt.BottomEdge | Qt.LeftEdge; width: 12; height: 12; z: 81
+            anchors { bottom: parent.bottom; left: parent.left }
+        }
+        ResizeHandle {
+            edges: Qt.BottomEdge | Qt.RightEdge; width: 12; height: 12; z: 81
+            anchors { bottom: parent.bottom; right: parent.right }
+        }
     }
 
     // ---- components --------------------------------------------------------
+    // Edge/corner hit zones that ask the compositor to resize the window.
+    component ResizeHandle: MouseArea {
+        id: rh
+        property int edges: 0
+        acceptedButtons: Qt.LeftButton
+        hoverEnabled: true
+        cursorShape: {
+            const t = edges & Qt.TopEdge, b = edges & Qt.BottomEdge;
+            const l = edges & Qt.LeftEdge, r = edges & Qt.RightEdge;
+            if (t && l) return Qt.SizeFDiagCursor;
+            if (t && r) return Qt.SizeBDiagCursor;
+            if (b && l) return Qt.SizeBDiagCursor;
+            if (b && r) return Qt.SizeFDiagCursor;
+            if (t || b) return Qt.SizeVerCursor;
+            if (l || r) return Qt.SizeHorCursor;
+            return Qt.ArrowCursor;
+        }
+        onPressed: win.startSystemResize(rh.edges)
+    }
+
     component BarButton: Rectangle {
         id: btn
         property string glyph
