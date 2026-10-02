@@ -600,7 +600,7 @@ Window {
     }
 
     function trashDelete(names) {
-        const err = fs.delete_permanent(names.join("\n"));
+        const err = trash.trash_delete(names.join("\n"));
         if (err) { win.toastMsg(err); return; }
         win.toastMsg("Deleted");
         win.trashCount = trash.trash_count();

@@ -177,6 +177,19 @@ pub fn restore(names: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Permanently delete entries (by stored trash name) from the trash.
+pub fn delete(names: &[String]) -> Result<(), String> {
+    let root = root();
+    let (files, info) = ensure(&root)?;
+    for name in names {
+        if !valid_name(name) {
+            return Err(format!("Invalid name: {name}"));
+        }
+        remove_item(&files, &info, name);
+    }
+    Ok(())
+}
+
 pub fn empty() -> Result<(), String> {
     let root = root();
     let (files, info) = ensure(&root)?;
@@ -279,6 +292,25 @@ mod tests {
         restore(&names).unwrap();
         assert!(file.exists());
         assert_eq!(count(), 0);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn delete_one() {
+        let _guard = LOCK.lock().unwrap();
+        let base = tmp("delete");
+        std::env::set_var("XDG_DATA_HOME", base.join("data"));
+        let work = base.join("work");
+        fs::create_dir_all(&work).unwrap();
+        let file = work.join("hello.txt");
+        fs::write(&file, b"hi").unwrap();
+
+        let names = trash_paths(&[file.clone()]).unwrap();
+        assert_eq!(count(), 1);
+
+        delete(&names).unwrap();
+        assert_eq!(count(), 0);
+        assert!(!root().join("files").join(&names[0]).exists());
         let _ = fs::remove_dir_all(&base);
     }
 

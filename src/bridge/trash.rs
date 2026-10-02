@@ -58,6 +58,20 @@ pub struct Trash {
         out.into()
     }),
 
+    // Permanently delete entries from the trash by their stored names.
+    trash_delete: qt_method!(fn trash_delete(&self, names: QString) -> QString {
+        let list: Vec<String> = names
+            .to_string()
+            .lines()
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect();
+        match trash::delete(&list) {
+            Ok(_) => QString::from(""),
+            Err(e) => e.into(),
+        }
+    }),
+
     trash_empty: qt_method!(fn trash_empty(&self) -> QString {
         match trash::empty() {
             Ok(_) => QString::from(""),
