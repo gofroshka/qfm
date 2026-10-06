@@ -20,6 +20,8 @@ pkgs.rustPlatform.buildRustPackage {
     qt6.qtmultimedia
   ];
 
+  nativeCheckInputs = [ pkgs.dbus ];
+
   # qttypes' build script locates Qt through qmake -query.
   QMAKE = "${pkgs.qt6.qtbase}/bin/qmake6";
 

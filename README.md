@@ -14,7 +14,7 @@ started on demand by `xdg-desktop-portal`.
 Most Qt file managers pull in Qt Widgets or a whole shell runtime. `qfm` keeps
 the UI declarative and the backend small:
 
-- **One process, one binary.** The backend (filesystem, trash, clipboard,
+- **One binary.** The backend (filesystem, trash, clipboard,
   portal) is exposed to QML through a thin `Qfm` module and the frontend is
   embedded via `qrc!`, so there is nothing to install alongside the executable.
 - **A picker and a browser in one.** Run it normally to browse, or let
@@ -62,9 +62,12 @@ The Rust side registers the `Qfm` QML module (`Fs`, `Clipboard`, `Preview`,
 pieces live in `qml/components/`, and pure helpers in `qml/Utils.js`. Every
 listing and trash entry crosses the boundary as JSON.
 
-The `FileChooser` backend runs on a background D-Bus thread and parks incoming
-requests in a queue; the GUI thread polls it, shows the picker window and
-answers the original D-Bus call with `file://` URIs.
+The dedicated `qfm --portal` process runs the `FileChooser` backend on a
+background D-Bus thread and parks incoming requests in a queue; the GUI thread
+polls it, shows the picker dialog and answers the original D-Bus call with
+`file://` URIs. Normal browser processes do not claim the portal service, so
+file chooser requests always open separately from existing browser windows.
+Closing the picker cancels its request and hides the dialog until the next one.
 
 ## Building
 
@@ -93,7 +96,9 @@ cargo test
 
 The test suite includes a smoke test that compiles and instantiates the
 embedded QML, so it needs Qt's QML import paths and an offscreen or Wayland QPA
-platform (the Nix `preCheck` sets these up).
+platform (the Nix `preCheck` sets these up). The portal regression test also
+needs `dbus-daemon`; it runs browser and picker processes on a private session
+bus to check service ownership and dialog cancellation.
 
 ## Running
 

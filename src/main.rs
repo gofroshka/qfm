@@ -20,12 +20,17 @@ fn main() {
 
     qfm::register_qml();
 
-    // Serve the FileChooser portal regardless of mode so the running instance
-    // can act as the system picker.
-    qfm::portal::serve();
+    // Only the dedicated backend owns the portal name. Browser windows must
+    // not intercept requests meant for the separately activated picker.
+    if portal_mode {
+        qfm::portal::serve();
+    }
 
     let mut engine = QmlEngine::new();
-    engine.set_property("qfmInitialPath".into(), QString::from(initial.as_str()).into());
+    engine.set_property(
+        "qfmInitialPath".into(),
+        QString::from(initial.as_str()).into(),
+    );
     engine.set_property("qfmPortalMode".into(), portal_mode.into());
     match std::env::var("QFM_QML") {
         Ok(path) => engine.load_file(path.into()),

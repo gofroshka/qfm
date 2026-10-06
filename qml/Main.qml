@@ -19,11 +19,20 @@ Window {
     visible: shown
     title: win.picker ? "Choose" : "Files"
     color: Theme.bg
+    flags: qfmPortalMode ? Qt.Dialog : Qt.Window
+    modality: qfmPortalMode ? Qt.WindowModal : Qt.NonModal
 
     // Hidden when started as a portal backend until a request arrives.
     property bool shown: !qfmPortalMode
     // Active FileChooser request from the Rust portal backend, or null.
     property var picker: null
+
+    onClosing: (close) => {
+        if (qfmPortalMode) {
+            close.accepted = false;
+            win.pickerCancel();
+        }
+    }
 
     // Rust backend, registered from main.rs as the QML module `Qfm`.
     Fs { id: fs }
@@ -680,16 +689,17 @@ Window {
 
     // ---- portal picker -----------------------------------------------------
     function pollPortal() {
+        if (!qfmPortalMode || win.picker) return;
         const raw = portal.poll_portal();
         if (!raw) return;
         let req;
         try { req = JSON.parse(raw); } catch (e) { return; }
         win.picker = req;
+        const start = (qfmInitialPath && qfmInitialPath !== "") ? qfmInitialPath : fs.home();
+        win.navigate(start);
         win.shown = true;
         win.raise();
         win.requestActivate();
-        const start = (qfmInitialPath && qfmInitialPath !== "") ? qfmInitialPath : fs.home();
-        win.navigate(start);
     }
 
     function pickerAccept() {
@@ -736,7 +746,7 @@ Window {
         // Poll the Rust portal backend for pending FileChooser requests.
         Timer {
             interval: 200
-            running: true
+            running: qfmPortalMode && win.picker === null
             repeat: true
             onTriggered: win.pollPortal()
         }

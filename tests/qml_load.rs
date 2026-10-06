@@ -1,7 +1,7 @@
 //! Smoke test: the embedded QML frontend must compile and load.
 
 use qmetaobject::prelude::*;
-use qmetaobject::{CompilationMode, ComponentStatus, QmlComponent, QmlEngine, QUrl};
+use qmetaobject::{CompilationMode, ComponentStatus, QUrl, QmlComponent, QmlEngine};
 
 #[test]
 fn main_qml_loads() {
@@ -13,7 +13,9 @@ fn main_qml_loads() {
 
     qfm::register_qml();
 
-    let engine = QmlEngine::new();
+    let mut engine = QmlEngine::new();
+    engine.set_property("qfmInitialPath".into(), QString::from("").into());
+    engine.set_property("qfmPortalMode".into(), false.into());
     let mut component = QmlComponent::new(&engine);
     component.load_url(
         QUrl::from(QString::from("qrc:/qml/Main.qml")),
