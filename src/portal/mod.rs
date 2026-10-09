@@ -16,8 +16,31 @@ use crate::util::text::file_uri;
 /// A FileChooser request waiting for the GUI to answer it.
 pub struct Pending {
     pub handle: String,
+    pub mode: Mode,
+    pub title: String,
+    pub accept_label: String,
     pub directory: bool,
     pub multiple: bool,
+    pub current_folder: String,
+    pub current_name: String,
+    pub files: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    OpenFile,
+    SaveFile,
+    SaveFiles,
+}
+
+impl Mode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenFile => "open",
+            Self::SaveFile => "save",
+            Self::SaveFiles => "saveFiles",
+        }
+    }
 }
 
 /// State shared between the D-Bus worker thread and the GUI thread.

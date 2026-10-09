@@ -9,6 +9,7 @@ Item {
     property string message: ""
     property string confirmLabel: "OK"
     property bool danger: false
+    property string glyph: danger ? "\uf2ed" : "\uf1f8"
     signal confirmed()
     signal cancelled()
 
@@ -46,7 +47,7 @@ Item {
         Text {
             id: cIcon
             anchors { left: parent.left; top: parent.top; leftMargin: 20; topMargin: 20 }
-            text: cd.danger ? "\uf2ed" : "\uf1f8"
+            text: cd.glyph
             color: cd.danger ? Theme.danger : Theme.accent
             font.family: Theme.icon
             font.pixelSize: 18

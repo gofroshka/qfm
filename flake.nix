@@ -23,12 +23,13 @@
           packages = with pkgsFor system; [
             cargo
             rustc
+            rustfmt
             pkg-config
             qt6.qtbase
             qt6.qtdeclarative
             qt6.qtmultimedia
 
-            # Editor tooling, surfaced to Zed via direnv (see .envrc).
+            # Editor tooling for Zed / Helix, surfaced via the devShell.
             nixd
             rust-analyzer
             nixfmt

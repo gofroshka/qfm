@@ -22,6 +22,17 @@ pub struct Fs {
         home_path().to_string_lossy().into_owned().into()
     }),
 
+    // Inspect a save destination without creating or modifying it.
+    path_kind: qt_method!(fn path_kind(&self, path: QString) -> QString {
+        let path = PathBuf::from(path.to_string());
+        match fs::symlink_metadata(&path) {
+            Ok(_) if path.is_dir() => QString::from("directory"),
+            Ok(_) => QString::from("file"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => QString::from("missing"),
+            Err(e) => format!("error:{e}").into(),
+        }
+    }),
+
     // Create a directory; returns "" on success or an error message.
     create_dir: qt_method!(fn create_dir(&self, parent: QString, name: QString) -> QString {
         let name = name.to_string();

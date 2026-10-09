@@ -44,6 +44,8 @@ the UI declarative and the backend small:
   while keeping the filter, selection and cursor.
 - Context menu, toasts, a custom status bar and edge/corner system resize.
 - CLI: open a path from the command line and accept `file://` URIs.
+- Portal picker: open files/folders, save a new file with an editable suggested
+  name and overwrite confirmation, or choose a folder for saving several files.
 
 ## Architecture
 
@@ -127,7 +129,8 @@ purged opportunistically on every trash mutation.
 | Shortcut | Action |
 |---|---|
 | `↑` / `↓`, `Home` / `End`, `PageUp` / `PageDown` | Move the cursor |
-| `Enter` / `→` | Open the entry |
+| `Enter` | Open the entry in the browser; confirm the selection in a picker |
+| `→` | Enter the folder / open the file |
 | `←` / `Backspace` | Go to the parent directory |
 | `Alt+←` / `Alt+→` / `Alt+↑` | History back / forward / parent |
 | `Space` | Quick Look the current entry |
@@ -159,6 +162,18 @@ The portal claims `org.freedesktop.impl.portal.desktop.qfm` and serves
 `org.freedesktop.impl.portal.FileChooser`, implementing `OpenFile`, `SaveFile`
 and `SaveFiles`. Requests time out after five minutes if the window is never
 answered.
+
+`SaveFile` shows a **File name** field populated from the application's suggested
+name. Navigate to the destination folder and click **Save**; the calling
+application writes the file after receiving its path. Existing files require
+replacement confirmation. `SaveFiles` chooses the currently open folder and
+returns a destination for each supplied filename, avoiding name collisions.
+In folder pickers, **Enter** chooses the highlighted folder without entering it;
+the accept button chooses the currently open folder. Use **→** to enter a folder
+and **←** to return to its parent. In file pickers, Enter confirms the file
+selection; in save dialogs, it confirms the destination filename. The
+application's title, accept button label and suggested starting folder are
+passed through to the UI.
 
 ## License
 

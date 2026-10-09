@@ -84,3 +84,9 @@ function joinPath(dir, name) {
 function baseName(path) {
     return path.split("/").pop();
 }
+
+// A picker filename must be one component and fit the bridge's line protocol.
+function validFileName(name) {
+    return name.length > 0 && name.trim().length > 0 && name !== "." && name !== ".."
+        && !/[\/\0\r\n]/.test(name);
+}

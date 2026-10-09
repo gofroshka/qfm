@@ -17,7 +17,9 @@ Window {
     minimumWidth: 520
     minimumHeight: 360
     visible: shown
-    title: win.picker ? "Choose" : "Files"
+    title: !win.picker ? "Files" : win.picker.title || (win.pickerSave ? "Save file"
+           : win.pickerSaveFiles ? "Choose destination folder"
+           : win.picker.directory ? "Choose folder" : "Choose file")
     color: Theme.bg
     flags: qfmPortalMode ? Qt.Dialog : Qt.Window
     modality: qfmPortalMode ? Qt.WindowModal : Qt.NonModal
@@ -26,6 +28,32 @@ Window {
     property bool shown: !qfmPortalMode
     // Active FileChooser request from the Rust portal backend, or null.
     property var picker: null
+    property string saveName: ""
+    readonly property bool pickerSave: !!win.picker && win.picker.mode === "save"
+    readonly property bool pickerSaveFiles: !!win.picker && win.picker.mode === "saveFiles"
+    readonly property string pickerLabel: {
+        if (!win.picker) return "";
+        if (win.picker.accept_label)
+            return win.picker.accept_label.replace(/_([^_])/g, "$1").replace(/__/g, "_");
+        if (win.pickerSave || win.pickerSaveFiles) return "Save";
+        return win.picker.directory ? "Choose folder" : "Choose file";
+    }
+    readonly property string pickerHint: {
+        if (!win.picker) return "";
+        if (win.pickerSave) return "Enter saves the file. Use \u2192 / \u2190 to navigate folders.";
+        if (win.pickerSaveFiles) return "Enter chooses the highlighted folder; " + win.pickerLabel
+            + " uses the current folder (" + win.picker.files.length + " files).";
+        return win.picker.directory ? "Enter chooses the highlighted folder. \u2192 opens it; \u2190 goes back."
+                                   : "Enter selects files. \u2192 opens folders; \u2190 goes back.";
+    }
+    readonly property bool pickerCanAccept: {
+        if (!win.picker || win.curPath === "") return false;
+        if (win.pickerSave) return Utils.validFileName(win.saveName);
+        if (win.pickerSaveFiles)
+            return win.picker.files.length > 0 && win.picker.files.every(Utils.validFileName);
+        if (win.picker.directory) return true;
+        return win.pickerOpenPaths().length > 0;
+    }
 
     onClosing: (close) => {
         if (qfmPortalMode) {
@@ -84,6 +112,7 @@ Window {
         for (let i = 0; i < src.length; i++) {
             const e = src[i];
             if (!win.showHidden && e.hidden) continue;
+            if (win.picker && win.picker.directory && !e.dir) continue;
             if (q.length > 0 && e.name.toLowerCase().indexOf(q) < 0) continue;
             out.push(e);
         }
@@ -410,6 +439,8 @@ Window {
 
     // Mouse click on a row: plain replaces, Ctrl toggles, Shift extends.
     function handleRowClick(i, modifiers) {
+        const entry = win.visibleEntries[i];
+        if (win.pickerSave && entry && !entry.dir) win.saveName = entry.name;
         if (modifiers & Qt.ControlModifier) {
             win.index = i;
             win.toggleSelect(i);
@@ -417,9 +448,8 @@ Window {
             win.index = i;
             win.selectRange(i);
         } else {
-            win.selected = ({});
-            win.anchor = i;
             win.index = i;
+            win.selectOnly(i);
         }
     }
 
@@ -452,6 +482,7 @@ Window {
         if (e.dir) { win.navigate(e.path); return; }
         if (win.picker) {
             win.index = i;
+            if (win.pickerSave) win.saveName = e.name;
             if (!win.picker.directory) win.pickerAccept();
             return;
         }
@@ -554,12 +585,17 @@ Window {
             ? what + " will be permanently deleted. This cannot be undone."
             : what + " will be moved to the trash.";
         confirm.confirmLabel = permanent ? "Delete" : "Trash";
+        confirm.glyph = permanent ? "\uf2ed" : "\uf1f8";
         confirm.danger = permanent;
         confirm.shown = true;
     }
 
     function confirmAccept() {
         const op = win.pendingOp || {};
+        if (op.type === "overwrite") {
+            if (win.picker && win.picker.handle === op.handle) win.pickerAnswer(0, [op.path]);
+            return;
+        }
         if (op.type !== "delete") return;
         if (op.permanent) {
             const err = fs.delete_permanent(op.paths.join("\n"));
@@ -695,31 +731,100 @@ Window {
         let req;
         try { req = JSON.parse(raw); } catch (e) { return; }
         win.picker = req;
-        const start = (qfmInitialPath && qfmInitialPath !== "") ? qfmInitialPath : fs.home();
-        win.navigate(start);
+        win.saveName = req.current_name || "";
+        win.backStack = [];
+        win.forwardStack = [];
+        win.typeAhead = "";
+        const fallback = (qfmInitialPath && qfmInitialPath !== "") ? qfmInitialPath : fs.home();
+        if (!win.load(req.current_folder || fallback, false)) win.load(fs.home(), false);
         win.shown = true;
         win.raise();
         win.requestActivate();
+        if (win.pickerSave) {
+            saveInput.forceActiveFocus();
+            saveInput.selectAll();
+        } else root.forceActiveFocus();
     }
 
-    function pickerAccept() {
-        if (!win.picker) return;
-        const list = win.visibleEntries;
-        const e = list[win.index];
-        const paths = [];
-        if (win.picker.directory) {
-            paths.push((e && e.dir) ? e.path : win.curPath);
-        } else {
-            if (e && !e.dir) paths.push(e.path);
-            else return;
+    function pickerOpenPaths() {
+        if (!win.picker) return [];
+        const paths = win.selectedPaths();
+        const entries = win.visibleEntries;
+        const out = [];
+        for (let i = 0; i < entries.length; i++) {
+            const e = entries[i];
+            if (e.dir === win.picker.directory && paths.indexOf(e.path) >= 0) out.push(e.path);
         }
-        win.pickerAnswer(0, paths);
+        return win.picker.multiple ? out : out.slice(0, 1);
+    }
+
+    // SaveFiles returns one destination per supplied name, preserving order.
+    // Avoid both existing entries and collisions within this request.
+    function pickerSaveFilesPaths(folder) {
+        let data;
+        try { data = JSON.parse(fs.list_json(folder)); } catch (e) { return []; }
+        if (data.error !== undefined) { win.toastMsg(data.error); return []; }
+        const used = Object.create(null);
+        for (let i = 0; i < data.entries.length; i++) used[data.entries[i].name] = true;
+        return win.picker.files.map(function(name) {
+            const dot = name.lastIndexOf(".");
+            const base = dot > 0 ? name.slice(0, dot) : name;
+            const ext = dot > 0 ? name.slice(dot) : "";
+            let candidate = name;
+            for (let n = 2; used[candidate]; n++) candidate = base + " " + n + ext;
+            used[candidate] = true;
+            return Utils.joinPath(folder, candidate);
+        });
+    }
+
+    function pickerAccept(useActiveFolder) {
+        if (!win.picker || win.overlayOpen || !win.pickerCanAccept) return;
+        const folder = useActiveFolder && win.activeEntry && win.activeEntry.dir
+            ? win.activeEntry.path : win.curPath;
+        if (win.pickerSave) {
+            const path = Utils.joinPath(win.curPath, win.saveName);
+            const kind = fs.path_kind(path);
+            if (kind === "directory") { win.toastMsg("A folder already has this name"); return; }
+            if (kind.indexOf("error:") === 0) { win.toastMsg(kind.slice(6)); return; }
+            if (kind === "file") {
+                win.pendingOp = { type: "overwrite", path: path, handle: win.picker.handle };
+                confirm.title = "Replace existing file?";
+                confirm.message = "\u201c" + win.saveName + "\u201d already exists. Saving will replace it.";
+                confirm.confirmLabel = "Replace";
+                confirm.glyph = "\uf0c7";
+                confirm.danger = true;
+                confirm.shown = true;
+                return;
+            }
+            win.pickerAnswer(0, [path]);
+        } else if (win.pickerSaveFiles) {
+            const paths = win.pickerSaveFilesPaths(folder);
+            if (paths.length > 0) win.pickerAnswer(0, paths);
+        } else if (win.picker.directory) {
+            const paths = win.picker.multiple && win.selectedCount > 0 ? win.pickerOpenPaths() : [];
+            win.pickerAnswer(0, paths.length > 0 ? paths : [folder]);
+        } else {
+            const paths = win.pickerOpenPaths();
+            if (paths.length > 0) win.pickerAnswer(0, paths);
+        }
+    }
+
+    function activateCurrent() {
+        if (win.picker) win.pickerAccept(true);
+        else win.openIndex(win.index);
     }
 
     function pickerCancel() { win.pickerAnswer(1, []); }
 
     function pickerAnswer(code, paths) {
         if (win.picker && win.picker.handle) portal.portal_reply(win.picker.handle, code, paths.join("\n"));
+        menu.shown = false;
+        prompt.shown = false;
+        confirm.shown = false;
+        trashPanel.shown = false;
+        quickLook.shown = false;
+        win.pendingOp = ({});
+        win.saveName = "";
         win.picker = null;
         if (qfmPortalMode) win.shown = false;
     }
@@ -771,10 +876,36 @@ Window {
             onTriggered: win.typeAhead = ""
         }
 
+        // Show the calling application's title and the purpose of the picker.
+        Item {
+            id: pickerInfo
+            anchors { left: parent.left; right: parent.right; top: parent.top }
+            height: win.picker ? 52 : 0
+            visible: win.picker !== null
+
+            Text {
+                anchors { left: parent.left; right: parent.right; top: parent.top; margins: 14; topMargin: 8 }
+                text: win.title
+                color: Theme.text
+                font.family: Theme.font
+                font.pixelSize: 13
+                font.weight: Font.Medium
+                elide: Text.ElideRight
+            }
+            Text {
+                anchors { left: parent.left; right: parent.right; bottom: parent.bottom; margins: 14; bottomMargin: 6 }
+                text: win.pickerHint
+                color: Theme.textDim
+                font.family: Theme.font
+                font.pixelSize: 11
+                elide: Text.ElideRight
+            }
+        }
+
         // ---- top bar -------------------------------------------------------
         Item {
             id: top
-            anchors { left: parent.left; right: parent.right; top: parent.top }
+            anchors { left: parent.left; right: parent.right; top: pickerInfo.bottom }
             height: 52
 
             Rectangle {
@@ -815,9 +946,10 @@ Window {
 
                 SearchField {
                     id: search
+                    objectName: "browserSearch"
                     width: 180
                     onTextChanged: win.filter = search.text
-                    onAccepted: win.openIndex(win.index)
+                    onAccepted: win.activateCurrent()
                     onMoveUp: win.move(-1)
                     onMoveDown: win.move(1)
                     onEscaped: root.forceActiveFocus()
@@ -895,7 +1027,7 @@ Window {
             id: list
             anchors {
                 left: parent.left; right: previewPanel.left
-                top: header.bottom; bottom: status.top
+                top: header.bottom; bottom: saveField.top
                 leftMargin: 8; rightMargin: 8
                 topMargin: 2; bottomMargin: 8
             }
@@ -989,6 +1121,7 @@ Window {
             onExited: win.hoverIndex = -1
 
             onPressed: mouse => {
+                root.forceActiveFocus();
                 pressX = mouse.x;
                 pressY = mouse.y;
                 banding = false;
@@ -1092,7 +1225,7 @@ Window {
         PreviewPanel {
             id: previewPanel
             anchors {
-                top: top.bottom; bottom: status.top
+                top: top.bottom; bottom: saveField.top
                 right: parent.right; rightMargin: 8
                 topMargin: 6; bottomMargin: 8
             }
@@ -1122,11 +1255,65 @@ Window {
             Behavior on opacity { NumberAnimation { duration: 150 } }
         }
 
+        // A save request chooses a new path; it does not create an empty file.
+        Item {
+            id: saveField
+            anchors { left: parent.left; right: parent.right; bottom: status.top }
+            height: win.pickerSave ? 48 : 0
+            visible: win.pickerSave
+
+            Text {
+                id: saveLabel
+                anchors { left: parent.left; leftMargin: 14; verticalCenter: parent.verticalCenter }
+                text: "File name"
+                color: Theme.textDim
+                font.family: Theme.font
+                font.pixelSize: 12
+            }
+            Rectangle {
+                anchors {
+                    left: saveLabel.right; leftMargin: 12
+                    right: parent.right; rightMargin: 14
+                    verticalCenter: parent.verticalCenter
+                }
+                height: 34
+                radius: Theme.radiusSmall
+                color: Theme.surface2
+                border.width: 1
+                border.color: saveInput.activeFocus ? Theme.accent : Theme.border
+
+                TextInput {
+                    id: saveInput
+                    objectName: "saveNameInput"
+                    anchors { fill: parent; leftMargin: 12; rightMargin: 12 }
+                    verticalAlignment: TextInput.AlignVCenter
+                    text: win.saveName
+                    onTextEdited: win.saveName = text
+                    color: Theme.text
+                    font.family: Theme.font
+                    font.pixelSize: 12
+                    selectionColor: Theme.accent
+                    selectedTextColor: Theme.bg
+                    clip: true
+                    onAccepted: win.pickerAccept()
+                    Keys.onEscapePressed: (e) => { win.pickerCancel(); e.accepted = true; }
+                }
+                Text {
+                    anchors { left: parent.left; leftMargin: 12; verticalCenter: parent.verticalCenter }
+                    visible: saveInput.text.length === 0
+                    text: "Enter a file name"
+                    color: Theme.textDim
+                    font.family: Theme.font
+                    font.pixelSize: 12
+                }
+            }
+        }
+
         // ---- status bar ----------------------------------------------------
         Item {
             id: status
             anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
-            height: 32
+            height: win.picker ? 40 : 32
 
             Rectangle {
                 anchors { left: parent.left; right: parent.right; top: parent.top }
@@ -1158,7 +1345,10 @@ Window {
 
                 ActionButton { label: "Cancel"; onActivated: win.pickerCancel() }
                 ActionButton {
-                    label: win.picker && win.picker.directory ? "Choose folder" : "Choose file"
+                    objectName: "pickerAcceptButton"
+                    label: win.pickerLabel
+                    enabled: win.pickerCanAccept
+                    opacity: enabled ? 1 : 0.45
                     primary: true
                     onActivated: win.pickerAccept()
                 }
@@ -1168,8 +1358,8 @@ Window {
         // ---- keyboard ------------------------------------------------------
         Keys.onUpPressed: (e) => { if (!win.overlayOpen) { win.move(-1); e.accepted = true; } }
         Keys.onDownPressed: (e) => { if (!win.overlayOpen) { win.move(1); e.accepted = true; } }
-        Keys.onReturnPressed: (e) => { if (!win.overlayOpen) { win.openIndex(win.index); e.accepted = true; } }
-        Keys.onEnterPressed: (e) => { if (!win.overlayOpen) { win.openIndex(win.index); e.accepted = true; } }
+        Keys.onReturnPressed: (e) => { if (!win.overlayOpen) { win.activateCurrent(); e.accepted = true; } }
+        Keys.onEnterPressed: (e) => { if (!win.overlayOpen) { win.activateCurrent(); e.accepted = true; } }
         Keys.onBackPressed: (e) => { if (!win.overlayOpen) { win.goUp(); e.accepted = true; } }
         Keys.onEscapePressed: (e) => {
             if (menu.shown) { menu.shown = false; e.accepted = true; }
@@ -1276,6 +1466,7 @@ Window {
 
         ConfirmDialog {
             id: confirm
+            objectName: "pickerConfirmation"
             onConfirmed: { confirm.shown = false; root.forceActiveFocus(); win.confirmAccept(); }
             onCancelled: { confirm.shown = false; root.forceActiveFocus(); }
         }

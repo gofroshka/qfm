@@ -13,10 +13,20 @@ pub struct Portal {
     poll_portal: qt_method!(fn poll_portal(&self) -> QString {
         match portal::poll() {
             Some(p) => format!(
-                "{{\"handle\":\"{}\",\"directory\":{},\"multiple\":{}}}",
+                "{{\"handle\":\"{}\",\"mode\":\"{}\",\"title\":\"{}\",\"accept_label\":\"{}\",\"directory\":{},\"multiple\":{},\"current_folder\":\"{}\",\"current_name\":\"{}\",\"files\":[{}]}}",
                 esc(&p.handle),
+                p.mode.as_str(),
+                esc(&p.title),
+                esc(&p.accept_label),
                 p.directory,
-                p.multiple
+                p.multiple,
+                esc(&p.current_folder),
+                esc(&p.current_name),
+                p.files
+                    .iter()
+                    .map(|name| format!("\"{}\"", esc(name)))
+                    .collect::<Vec<_>>()
+                    .join(",")
             )
             .into(),
             None => QString::from(""),
